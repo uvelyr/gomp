@@ -28,10 +28,32 @@ const (
 )
 
 
+type CommandKind int
+
+const (
+	CmdAddToQueue CommandKind = iota
+	CmdSkip
+	CmdShowQueue
+	CmdSeek
+	CmdTogglePause
+	CmdChangeSpeed
+	CmdChangeVolume
+	CmdQuit
+	CmdNone
+)
+
+type Command struct {
+	Kind CommandKind
+	Value any
+}
+
 type Song struct {
 	Path string //path to a file, including the file itself
 	Name string //name of a fle
 }
+
+var numberChan chan rune
+var keyChan chan keyboard.Key
 
 func listSongs(songs []Song) {
 	for i, song := range songs {
@@ -45,10 +67,8 @@ func chooseSong(songs []Song) Song {
 	var input []rune
 
 	for {
-		char, key, err := keyboard.GetKey()
-		if err != nil {
-			log.Fatal(err)
-		}
+		char := <- numberChan
+		key := <-keyChan
 
 		switch key {
 		case keyboard.KeyEnter:
@@ -177,6 +197,42 @@ func FindSongs(path string) ([]Song, error) {
 	return songs, nil
 }
 
+func translateRune(r rune) Command {
+	switch r {
+	case 'q', 'Q':
+		return Command{Kind: CmdAddToQueue}
+	case 's', 'S':
+		return Command{Kind: CmdSkip}
+	case 'd', 'D':
+		return Command{Kind: CmdShowQueue}
+	case 'n', 'N':
+		return Command{Kind: CmdSeek, Value: -seekStep}
+	case 'm', 'M':
+		return Command{Kind: CmdSeek, Value: seekStep}
+	default:
+		return Command{Kind: CmdNone}
+	}
+}
+
+func translateKey(k keyboard.Key) Command {
+	switch k {
+	case keyboard.KeySpace:
+		return Command{Kind: CmdTogglePause}
+	case keyboard.KeyArrowLeft:
+		return Command{Kind: CmdChangeSpeed, Value: -speedStep}
+	case keyboard.KeyArrowRight:
+		return Command{Kind: CmdChangeSpeed, Value: speedStep}
+	case keyboard.KeyArrowDown:
+		return Command{Kind: CmdChangeVolume, Value: -volumeStep}
+	case keyboard.KeyArrowUp:
+		return Command{Kind: CmdChangeVolume, Value: volumeStep}
+	case keyboard.KeyEsc:
+		return Command{Kind: CmdQuit}
+	default:
+		return Command{Kind: CmdNone}
+	}
+}
+
 func main() {
 	typeMessage("Welcome to Axiom MP3-player", 0)
 
@@ -193,7 +249,7 @@ func main() {
 	quitChan := make(chan struct{})
 	songDoneChan := make(chan struct{})
 	songSkipChan := make(chan struct{})
-	showPlaylistChan := make(chan struct{})
+	showQueueChan := make(chan struct{})
 	updateTimer := make(chan struct{})
 	hasSongs := make(chan struct{}, 1)
 
@@ -221,67 +277,98 @@ func main() {
 	}
 	defer keyboard.Close()
 
+	cmdChan := make(chan Command)
+	numberChan = make(chan rune, 1)
+	keyChan = make(chan keyboard.Key, 2)
+
+	//input goroutine
 	go func() {
 		for {
+			// read a key from keyboard
 			char, key, err := keyboard.GetKey()
 			if err != nil {
 				log.Fatal(err)
 			}
 
-			switch char {
-			case 'q', 'Q':
+			var cmd Command
+			// if a character was pressed
+			if char != 0 {
+				// if it's a number, send to numberChan for songSelection
+				if char >= '0' && char <= '9' {
+					numberChan <- char
+					keyChan <- key //also send the key if needed
+					continue
+				}
+				cmd = translateRune(char)
+			} else {
+				// special keys (arrows, enter, etc.)
+				cmd = translateKey(key)
+			}
+			if cmd.Kind != CmdNone {
+				//if it maps to any command, send it directly to channel
+				cmdChan <- cmd
+			} else {
+				// else interpret it as song selection input
+				numberChan <- char
+				keyChan <- key
+			}
+		}
+	}()
+
+	go func() {
+		for {
+			cmd := <- cmdChan
+
+			switch cmd.Kind {
+			case CmdAddToQueue:
 				listSongs(allSongs)
 				queueSong := chooseSong(allSongs)
+				fmt.Println(5)
 				fmt.Println(queueSong.Name)
 				playlist = append(playlist, queueSong)
 				select { case hasSongs <- struct{}{}: default: }
-				continue
-			case 's', 'S':
+			case CmdSkip:
 				if control != nil {
 					songSkipChan <- struct{}{}
 				}
-			case 'd', 'D':
-				showPlaylistChan <- struct{}{}
-			case 'n', 'N':
-				if streamer != nil {
-					changeTime(streamer, format, -seekStep)
+			case CmdShowQueue:
+				showQueueChan <- struct{}{}
+			case CmdSeek:
+				if delta, ok := cmd.Value.(time.Duration); streamer != nil && ok {
+					changeTime(streamer, format, delta)
+				} else {
+					fmt.Println("Invalid type for time duration")
 				}
-			case 'm', 'M':
-				if streamer != nil {
-					changeTime(streamer, format, seekStep)
+			case CmdTogglePause:
+				togglePause(control)
+			case CmdChangeSpeed:
+				if delta, ok := cmd.Value.(float64); ok {
+					changeSpeed(speed, delta)
+				} else {
+					fmt.Println("Invalid type for changing speed")
 				}
-			}
-
-			if control != nil && volume != nil && speed != nil {
-				switch key {
-				case keyboard.KeyEnter:
-					togglePause(control)
-				case keyboard.KeyArrowLeft:
-					changeSpeed(speed, -speedStep)
-				case keyboard.KeyArrowRight:
-					changeSpeed(speed, speedStep)
-				case keyboard.KeyArrowUp:
-					changeVolume(volume, volumeStep)
-				case keyboard.KeyArrowDown:
-					changeVolume(volume, -volumeStep)
-				case keyboard.KeyEsc:
-					select {
-					case quitChan <- struct{}{}:
-					default:
-						typeMessage("Thanks for using Axiom MP3-player", 0)
-						time.Sleep(time.Second)
-						keyboard.Close()
-						os.Exit(0)
-					}
+			case CmdChangeVolume:
+				if delta, ok := cmd.Value.(float64); ok {
+					changeVolume(volume, delta)
+				} else {
+					fmt.Println("Invalid type for changing volume")
+				}
+			case CmdQuit:
+				select {
+				case quitChan <- struct{}{}:
+				default:
+					typeMessage("Thanks for using Axiom MP3-player", 0)
+					time.Sleep(time.Second)
+					keyboard.Close()
+					os.Exit(0)
 				}
 			}
 		}
 	}()
 
-
 	go func() {
 		for {
-			<- showPlaylistChan
+			<- showQueueChan
 			fmt.Println(playlist)
 		}
 	}()
