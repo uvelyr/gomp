@@ -18,6 +18,7 @@ import (
 )
 
 const (
+	bufferSize = time.Second / 10
 	speedStep  = 0.05
 	volumeStep = 0.35
 	seekStep = time.Second * 5
@@ -57,8 +58,112 @@ type KeyPress struct {
 	Key keyboard.Key
 }
 
-var numberChan chan rune
-var keyChan chan keyboard.Key
+type Player struct {
+	Playlist []Song
+
+	Streamer beep.StreamSeekCloser
+	File *os.File
+	Format beep.Format
+	Control *beep.Ctrl
+	Speed *beep.Resampler
+	Volume *effects.Volume
+
+	//internal channgels for controlling
+	songDone chan struct{}
+	songSkip chan struct{}
+	updateTick *time.Ticker
+}
+
+func NewPlayer() *Player {
+	return &Player{
+		Playlist: []Song{},
+		songDone: make(chan struct{}),
+		songSkip: make(chan struct{}),
+		updateTick: time.NewTicker(time.Second),
+	}
+}
+
+func (p *Player) PlayNext() error {
+	if len(p.Playlist) == 0 {
+		return nil
+	}
+
+	file, err := os.Open(p.Playlist[0].Path)
+	if err != nil {
+		fmt.Println("Couldn't open file: ", err)
+		return err
+	}
+
+	streamer, format, err := mp3.Decode(file)
+	if err != nil {
+		fmt.Println("Couldn't decode file: ", err)
+		return err
+	}
+
+	p.Streamer = streamer
+	p.Format = format
+
+	//initiating a streamer.
+	p.Control = &beep.Ctrl{Streamer: streamer, Paused: false}
+	p.Volume = &effects.Volume{
+		Streamer: p.Control,
+		Volume:   0,
+		Silent:   false,
+		Base:   2,
+	}
+	p.Speed = beep.ResampleRatio(4, 1, p.Volume)
+
+	//setting up a speaker
+	speaker.Init(format.SampleRate, format.SampleRate.N(bufferSize))
+
+	//play song
+	speaker.Play(beep.Seq(p.Speed, beep.Callback(func() {
+		p.songDone <- struct{}{}
+	})))
+
+	//delete played song from playlist
+	p.Playlist = p.Playlist[1:]
+	return nil
+}
+
+func (p *Player) TogglePause() error {
+	speaker.Lock()
+	p.Control.Paused = !p.Control.Paused
+	speaker.Unlock()
+	return nil
+}
+
+func (p *Player) ChangeVolume(delta float64) error {
+	newVolume := clampFloat(p.Volume.Volume+delta, minVolume, maxVolume)
+	speaker.Lock()
+	p.Volume.Volume = newVolume
+	p.Volume.Silent = p.Volume.Volume <= minVolume
+	speaker.Unlock()
+	return nil
+}
+
+func (p *Player) ChangeSpeed(delta float64) error {
+	newRatio := clampFloat(p.Speed.Ratio()+delta, minSpeed, maxSpeed)
+	speaker.Lock()
+	p.Speed.SetRatio(newRatio)
+	speaker.Unlock()
+	return nil
+}
+
+func (p *Player) Seek(delta time.Duration) error {
+	speaker.Lock()
+	curPos := p.Streamer.Position()
+	deltaSamples := p.Format.SampleRate.N(delta)
+	newPos := clampInt(curPos + deltaSamples, 0, p.Streamer.Len())
+	p.Streamer.Seek(newPos)
+	speaker.Unlock()
+	return nil
+}
+
+func (p *Player) Skip() error {
+	p.songSkip <- struct{}{}
+	return nil
+}
 
 func listSongs(songs []Song) {
 	for i, song := range songs {
@@ -224,19 +329,8 @@ func translateKey(k keyboard.Key) Command {
 func main() {
 	typeMessage("Welcome to Axiom MP3-player", 0)
 
-	//declare song controllers
-	var streamer beep.StreamSeekCloser
-	var format beep.Format
-	var control *beep.Ctrl
-	var speed *beep.Resampler
-	var volume *effects.Volume
-
-	var playlist []Song
-
 	//declare signal channels
 	quitChan := make(chan struct{})
-	songDoneChan := make(chan struct{})
-	songSkipChan := make(chan struct{})
 	showQueueChan := make(chan struct{})
 	updateTimer := make(chan struct{})
 	hasSongs := make(chan struct{}, 1)
@@ -270,6 +364,7 @@ func main() {
 	playerControlChan := make(chan KeyPress)
 	activeInputChan := playerControlChan
 
+	player := NewPlayer()
 	//raw input goroutine
 	go func() {
 		for {
@@ -306,33 +401,32 @@ func main() {
 				activeInputChan = songSelectionChan
 				queueSong := chooseSong(songSelectionChan, allSongs)
 				activeInputChan = playerControlChan
-				fmt.Println(5)
 				fmt.Println(queueSong.Name)
-				playlist = append(playlist, queueSong)
+				player.Playlist = append(player.Playlist, queueSong)
 				select { case hasSongs <- struct{}{}: default: }
 			case CmdSkip:
-				if control != nil {
-					songSkipChan <- struct{}{}
-				}
+				player.Skip()
 			case CmdShowQueue:
 				showQueueChan <- struct{}{}
 			case CmdSeek:
-				if delta, ok := cmd.Value.(time.Duration); streamer != nil && ok {
-					changeTime(streamer, format, delta)
+				if delta, ok := cmd.Value.(time.Duration); player.Streamer != nil && ok {
+					player.Seek(delta)
 				} else {
 					fmt.Println("Invalid type for time duration")
 				}
 			case CmdTogglePause:
-				togglePause(control)
+				player.TogglePause()
 			case CmdChangeSpeed:
+				//type assertion
 				if delta, ok := cmd.Value.(float64); ok {
-					changeSpeed(speed, delta)
+					player.ChangeSpeed(delta)
 				} else {
 					fmt.Println("Invalid type for changing speed")
 				}
 			case CmdChangeVolume:
+				//type assertion
 				if delta, ok := cmd.Value.(float64); ok {
-					changeVolume(volume, delta)
+					player.ChangeVolume(delta)
 				} else {
 					fmt.Println("Invalid type for changing volume")
 				}
@@ -352,7 +446,7 @@ func main() {
 	go func() {
 		for {
 			<- showQueueChan
-			fmt.Println(playlist)
+			fmt.Println(player.Playlist)
 		}
 	}()
 
@@ -360,79 +454,39 @@ func main() {
 		//wait until there is a signal that there are songs
 		<- hasSongs
 
-		if len(playlist) == 0 {
-			continue
-		}
-
-		file, err := os.Open(playlist[0].Path)
-		if err != nil {
-			log.Fatal(err)
-		}
-		streamer, format, err = mp3.Decode(file)
-		if err != nil {
-			log.Fatal(err)
-		}
-		//setting up a speaker
-		speaker.Init(format.SampleRate, format.SampleRate.N(time.Second/10))
-
-		//initiating a streamer.
-		control = &beep.Ctrl{Streamer: streamer, Paused: false}
-		volume = &effects.Volume{
-			Streamer: control,
-			Volume:   0,
-			Silent:   false,
-			Base:   2,
-		}
-		speed = beep.ResampleRatio(4, 1, volume)
-
-		//play song
-		speaker.Play(beep.Seq(speed, beep.Callback(func() {
-			fmt.Println("SONG DONE, SENDING SIGNAL")
-			songDoneChan <- struct{}{}
-			fmt.Println("SIGNAL SENT")
-		})))
-
-		//delete played song from playlist
-		playlist = playlist[1:]
-
-		//declare a ticker
-		ticker := time.NewTicker(time.Second)
+		player.PlayNext()
 
 		innerloop:
 		for {
-			//wait till one of the actions is songDoneChan
+			//wait till one of the actions is done
 			select {
-			case <- songSkipChan:
-				speaker.Lock()
-				control.Paused = true
-				speaker.Unlock()
+			case <- player.songSkip:
+				player.TogglePause()
 
 				//if there are any remaining songs in the playlist, send signal to hasSongs
 				//to unblock player
-				if len(playlist) > 0 {
-					//will keep for hasSongs to start listening
+				if len(player.Playlist) > 0 {
 					select {
 					case hasSongs <- struct{}{}:
 					default:
 					}
 				}
 				break innerloop
-			case <- songDoneChan:
+			case <- player.songDone:
 				//if there are any remaining songs in the playlist, send signal to hasSongs
 				//to unblock player
 				fmt.Println("Song is done!")
-				if len(playlist) > 0 {
-					//will keep for hasSongs to start listening
+				if len(player.Playlist) > 0 {
 					select {
 					case hasSongs <- struct{}{}:
 					default:
 					}
 				}
 				break innerloop
-			case <- ticker.C:
-				updateTime(streamer, format)
+			case <- player.updateTick.C:
+				updateTime(player.Streamer, player.Format)
 			case <- updateTimer:
-				updateTime(streamer, format)
+				updateTime(player.Streamer, player.Format)
 			case <- quitChan:
 				typeMessage("Thanks for using Axiom MP3-player", 0)
 				time.Sleep(time.Second)
@@ -440,10 +494,10 @@ func main() {
 			}
 		}
 		//stop the ticker
-		ticker.Stop()
+		player.updateTick.Stop()
 
 		//close streamer and file
-		streamer.Close()
-		file.Close()
+		player.Streamer.Close()
+		player.File.Close()
 	}
 }
