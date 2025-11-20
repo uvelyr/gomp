@@ -52,6 +52,11 @@ type Song struct {
 	Name string //name of a fle
 }
 
+type KeyPress struct {
+	Rune rune
+	Key keyboard.Key
+}
+
 var numberChan chan rune
 var keyChan chan keyboard.Key
 
@@ -61,16 +66,13 @@ func listSongs(songs []Song) {
 	}
 }
 
-func chooseSong(songs []Song) Song {
+func chooseSong(eventChan <-chan KeyPress, songs []Song) Song {
 	fmt.Println("Enter the number of song: ")
 
 	var input []rune
 
-	for {
-		char := <- numberChan
-		key := <-keyChan
-
-		switch key {
+	for ev := range eventChan{
+		switch ev.Key {
 		case keyboard.KeyEnter:
 			if len(input) == 0 {
 				fmt.Println("Invalid input, try again: ")
@@ -86,7 +88,6 @@ func chooseSong(songs []Song) Song {
 				continue
 			}
 			return songs[choice-1]
-
 		case keyboard.KeyBackspace, keyboard.KeyBackspace2:
 			if len(input) > 0 {
 				input = input[:len(input)-1]
@@ -95,29 +96,16 @@ func chooseSong(songs []Song) Song {
 		case keyboard.KeyEsc:
 			typeMessage("Thanks for using Axiom MP3-player", 0)
 			time.Sleep(time.Second)
+			keyboard.Close()
 			os.Exit(0)
 		default:
-			if char >= '0' && char <= '9' {
-				input = append(input, char)
-				fmt.Printf("%c", char)
+			if ev.Rune >= '0' && ev.Rune <= '9' {
+				input = append(input, ev.Rune)
+				fmt.Printf("%c", ev.Rune)
 			}
 		}
 	}
-}
-
-func clampFloat(v, lo, hi float64) float64 {
-	if v < lo { return lo }
-	if v > hi {
-		fmt.Println("RETURNING MAX VALUE")
-		return hi
-	}
-	return v
-}
-
-func clampInt(v, lo, hi int) int {
-	if v < lo { return lo }
-	if v > hi { return hi }
-	return v
+	return Song{}
 }
 
 func changeVolume(v *effects.Volume, delta float64) {
@@ -278,39 +266,32 @@ func main() {
 	defer keyboard.Close()
 
 	cmdChan := make(chan Command)
-	numberChan = make(chan rune, 1)
-	keyChan = make(chan keyboard.Key, 2)
+	songSelectionChan := make(chan KeyPress)
+	playerControlChan := make(chan KeyPress)
+	activeInputChan := playerControlChan
 
-	//input goroutine
+	//raw input goroutine
 	go func() {
 		for {
-			// read a key from keyboard
+			//read a key from keyboard
 			char, key, err := keyboard.GetKey()
 			if err != nil {
-				log.Fatal(err)
+				fmt.Println("Couldn't get key:", err)
 			}
+			//send wherever curInChan points to
+			activeInputChan <- KeyPress{Rune: char, Key: key}
+		}
+	}()
 
-			var cmd Command
-			// if a character was pressed
-			if char != 0 {
-				// if it's a number, send to numberChan for songSelection
-				if char >= '0' && char <= '9' {
-					numberChan <- char
-					keyChan <- key //also send the key if needed
-					continue
-				}
-				cmd = translateRune(char)
+	//handle playerInput
+	go func() {
+		for {
+			keyPress := <- playerControlChan
+
+			if keyPress.Rune != 0 {
+				cmdChan <- translateRune(keyPress.Rune)
 			} else {
-				// special keys (arrows, enter, etc.)
-				cmd = translateKey(key)
-			}
-			if cmd.Kind != CmdNone {
-				//if it maps to any command, send it directly to channel
-				cmdChan <- cmd
-			} else {
-				// else interpret it as song selection input
-				numberChan <- char
-				keyChan <- key
+				cmdChan <- translateKey(keyPress.Key)
 			}
 		}
 	}()
@@ -322,7 +303,9 @@ func main() {
 			switch cmd.Kind {
 			case CmdAddToQueue:
 				listSongs(allSongs)
-				queueSong := chooseSong(allSongs)
+				activeInputChan = songSelectionChan
+				queueSong := chooseSong(songSelectionChan, allSongs)
+				activeInputChan = playerControlChan
 				fmt.Println(5)
 				fmt.Println(queueSong.Name)
 				playlist = append(playlist, queueSong)
