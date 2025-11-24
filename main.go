@@ -4,6 +4,7 @@ import (
 	"log"
 	"math/rand"
 	"strconv"
+	"errors"
 	//	"io/fs"
 	"fmt"
 	"os"
@@ -13,7 +14,6 @@ import (
 	"github.com/eiannone/keyboard"
 	"github.com/gopxl/beep"
 	"github.com/gopxl/beep/effects"
-	"github.com/gopxl/beep/mp3"
 	"github.com/gopxl/beep/speaker"
 )
 
@@ -43,21 +43,6 @@ const (
 	CmdNone
 )
 
-type Command struct {
-	Kind CommandKind
-	Value any
-}
-
-type Song struct {
-	Path string //path to a file, including the file itself
-	Name string //name of a fle
-}
-
-type KeyPress struct {
-	Rune rune
-	Key keyboard.Key
-}
-
 type Player struct {
 	Playlist []Song
 
@@ -74,96 +59,7 @@ type Player struct {
 	updateTick *time.Ticker
 }
 
-func NewPlayer() *Player {
-	return &Player{
-		Playlist: []Song{},
-		songDone: make(chan struct{}),
-		songSkip: make(chan struct{}),
-		updateTick: time.NewTicker(time.Second),
-	}
-}
-
-func (p *Player) PlayNext() error {
-	if len(p.Playlist) == 0 {
-		return nil
-	}
-
-	file, err := os.Open(p.Playlist[0].Path)
-	if err != nil {
-		fmt.Println("Couldn't open file: ", err)
-		return err
-	}
-
-	streamer, format, err := mp3.Decode(file)
-	if err != nil {
-		fmt.Println("Couldn't decode file: ", err)
-		return err
-	}
-
-	p.Streamer = streamer
-	p.Format = format
-
-	//initiating a streamer.
-	p.Control = &beep.Ctrl{Streamer: streamer, Paused: false}
-	p.Volume = &effects.Volume{
-		Streamer: p.Control,
-		Volume:   0,
-		Silent:   false,
-		Base:   2,
-	}
-	p.Speed = beep.ResampleRatio(4, 1, p.Volume)
-
-	//setting up a speaker
-	speaker.Init(format.SampleRate, format.SampleRate.N(bufferSize))
-
-	//play song
-	speaker.Play(beep.Seq(p.Speed, beep.Callback(func() {
-		p.songDone <- struct{}{}
-	})))
-
-	//delete played song from playlist
-	p.Playlist = p.Playlist[1:]
-	return nil
-}
-
-func (p *Player) TogglePause() error {
-	speaker.Lock()
-	p.Control.Paused = !p.Control.Paused
-	speaker.Unlock()
-	return nil
-}
-
-func (p *Player) ChangeVolume(delta float64) error {
-	newVolume := clampFloat(p.Volume.Volume+delta, minVolume, maxVolume)
-	speaker.Lock()
-	p.Volume.Volume = newVolume
-	p.Volume.Silent = p.Volume.Volume <= minVolume
-	speaker.Unlock()
-	return nil
-}
-
-func (p *Player) ChangeSpeed(delta float64) error {
-	newRatio := clampFloat(p.Speed.Ratio()+delta, minSpeed, maxSpeed)
-	speaker.Lock()
-	p.Speed.SetRatio(newRatio)
-	speaker.Unlock()
-	return nil
-}
-
-func (p *Player) Seek(delta time.Duration) error {
-	speaker.Lock()
-	curPos := p.Streamer.Position()
-	deltaSamples := p.Format.SampleRate.N(delta)
-	newPos := clampInt(curPos + deltaSamples, 0, p.Streamer.Len())
-	p.Streamer.Seek(newPos)
-	speaker.Unlock()
-	return nil
-}
-
-func (p *Player) Skip() error {
-	p.songSkip <- struct{}{}
-	return nil
-}
+var ErrNoSongs = errors.New("No songs in playlist")
 
 func listSongs(songs []Song) {
 	for i, song := range songs {
@@ -211,42 +107,6 @@ func chooseSong(eventChan <-chan KeyPress, songs []Song) Song {
 		}
 	}
 	return Song{}
-}
-
-func changeVolume(v *effects.Volume, delta float64) {
-	newVolume := clampFloat(v.Volume+delta, minVolume, maxVolume)
-
-	speaker.Lock()
-	v.Volume = newVolume
-
-	if v.Volume <= minVolume {
-		v.Silent = true
-	} else {
-		v.Silent = false
-	}
-	speaker.Unlock()
-}
-
-func changeSpeed(r *beep.Resampler, delta float64) {
-	newRatio := clampFloat(r.Ratio()+delta, minSpeed, maxSpeed)
-	speaker.Lock()
-	r.SetRatio(newRatio)
-	speaker.Unlock()
-}
-
-func changeTime(streamer beep.StreamSeekCloser, format beep.Format, delta time.Duration) {
-	speaker.Lock()
-	cur := streamer.Position()
-	deltaSamples := format.SampleRate.N(delta)
-	newPos := clampInt(cur+deltaSamples, 0, streamer.Len())
-	streamer.Seek(newPos)
-	speaker.Unlock()
-}
-
-func togglePause(ctrl *beep.Ctrl) {
-	speaker.Lock()
-	ctrl.Paused = !ctrl.Paused
-	speaker.Unlock()
 }
 
 func typeMessage(text string, baseDelay time.Duration) {
@@ -326,10 +186,20 @@ func translateKey(k keyboard.Key) Command {
 	}
 }
 
+func translateKeyPress(kp KeyPress) Command {
+	if kp.Rune != 0 {
+		return translateRune(kp.Rune)
+	} else {
+		return translateKey(kp.Key)
+	}
+}
+
 func main() {
 	typeMessage("Welcome to Axiom MP3-player", 0)
 
 	//declare signal channels
+	var songSelectionMode bool
+	songSelectionMode = false
 	quitChan := make(chan struct{})
 	showQueueChan := make(chan struct{})
 	updateTimer := make(chan struct{})
@@ -360,9 +230,8 @@ func main() {
 	defer keyboard.Close()
 
 	cmdChan := make(chan Command)
-	songSelectionChan := make(chan KeyPress)
-	playerControlChan := make(chan KeyPress)
-	activeInputChan := playerControlChan
+	songSelectionChan := make(chan KeyPress, 16)
+	keyPressChan := make(chan KeyPress, 16)
 
 	player := NewPlayer()
 	//raw input goroutine
@@ -374,19 +243,17 @@ func main() {
 				fmt.Println("Couldn't get key:", err)
 			}
 			//send wherever curInChan points to
-			activeInputChan <- KeyPress{Rune: char, Key: key}
+			keyPressChan <- KeyPress{Rune: char, Key: key}
 		}
 	}()
 
 	//handle playerInput
 	go func() {
-		for {
-			keyPress := <- playerControlChan
-
-			if keyPress.Rune != 0 {
-				cmdChan <- translateRune(keyPress.Rune)
+		for kp := range keyPressChan {
+			if songSelectionMode {
+				songSelectionChan <- kp
 			} else {
-				cmdChan <- translateKey(keyPress.Key)
+				cmdChan <- translateKeyPress(kp)
 			}
 		}
 	}()
@@ -398,9 +265,9 @@ func main() {
 			switch cmd.Kind {
 			case CmdAddToQueue:
 				listSongs(allSongs)
-				activeInputChan = songSelectionChan
+				songSelectionMode = true
 				queueSong := chooseSong(songSelectionChan, allSongs)
-				activeInputChan = playerControlChan
+				songSelectionMode = false
 				fmt.Println(queueSong.Name)
 				player.Playlist = append(player.Playlist, queueSong)
 				select { case hasSongs <- struct{}{}: default: }
@@ -434,7 +301,8 @@ func main() {
 				select {
 				case quitChan <- struct{}{}:
 				default:
-					typeMessage("Thanks for using Axiom MP3-player", 0)
+					typeMessage("Thhhhanks for using Axiom MP3-player", 0)
+					player.updateTick.Stop()
 					time.Sleep(time.Second)
 					keyboard.Close()
 					os.Exit(0)
@@ -488,16 +356,25 @@ func main() {
 			case <- updateTimer:
 				updateTime(player.Streamer, player.Format)
 			case <- quitChan:
-				typeMessage("Thanks for using Axiom MP3-player", 0)
+				typeMessage("Thanks fffor using Axiom MP3-player", 0)
+				player.updateTick.Stop()
+				speaker.Lock()
+				speaker.Close()
+				speaker.Unlock()
+				close(player.songSkip)
+				close(player.songDone)
+				close(hasSongs)
 				time.Sleep(time.Second)
 				return
 			}
 		}
-		//stop the ticker
-		player.updateTick.Stop()
 
-		//close streamer and file
-		player.Streamer.Close()
-		player.File.Close()
+		if player.Streamer != nil {
+			if err := player.Streamer.Close(); err != nil {
+				fmt.Println("Error closing streamer: ", err)
+			}
+		}
+		player.Streamer = nil
+		player.File = nil
 	}
 }
