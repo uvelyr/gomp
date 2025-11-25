@@ -14,7 +14,6 @@ import (
 	"github.com/eiannone/keyboard"
 	"github.com/gopxl/beep"
 	"github.com/gopxl/beep/effects"
-	"github.com/gopxl/beep/speaker"
 )
 
 const (
@@ -26,21 +25,6 @@ const (
 	maxVolume = 2.0
 	minSpeed = 0.6
 	maxSpeed = 2.0
-)
-
-
-type CommandKind int
-
-const (
-	CmdAddToQueue CommandKind = iota
-	CmdSkip
-	CmdShowQueue
-	CmdSeek
-	CmdTogglePause
-	CmdChangeSpeed
-	CmdChangeVolume
-	CmdQuit
-	CmdNone
 )
 
 type Player struct {
@@ -150,91 +134,58 @@ func FindSongs(path string) ([]Song, error) {
 	return songs, nil
 }
 
-func translateRune(r rune) Command {
-	switch r {
-	case 'q', 'Q':
-		return Command{Kind: CmdAddToQueue}
-	case 's', 'S':
-		return Command{Kind: CmdSkip}
-	case 'd', 'D':
-		return Command{Kind: CmdShowQueue}
-	case 'n', 'N':
-		return Command{Kind: CmdSeek, Value: -seekStep}
-	case 'm', 'M':
-		return Command{Kind: CmdSeek, Value: seekStep}
-	default:
-		return Command{Kind: CmdNone}
-	}
+
+
+func setupChannels() (
+	quitChan chan struct{},
+	showQueueChan chan struct{},
+	updateTimer chan struct{},
+	hasSongs chan struct{},
+	cmdChan chan Command,
+	songSelectionChan chan KeyPress,
+	keyPressChan chan KeyPress,
+) {
+	quitChan = make(chan struct{})
+	showQueueChan = make(chan struct{})
+	updateTimer = make(chan struct{})
+	hasSongs = make(chan struct{}, 1)
+	cmdChan = make(chan Command)
+	songSelectionChan = make(chan KeyPress, 16)
+	keyPressChan = make(chan KeyPress, 16)
+
+	return quitChan, showQueueChan, updateTimer, hasSongs, cmdChan, songSelectionChan, keyPressChan
 }
 
-func translateKey(k keyboard.Key) Command {
-	switch k {
-	case keyboard.KeySpace:
-		return Command{Kind: CmdTogglePause}
-	case keyboard.KeyArrowLeft:
-		return Command{Kind: CmdChangeSpeed, Value: -speedStep}
-	case keyboard.KeyArrowRight:
-		return Command{Kind: CmdChangeSpeed, Value: speedStep}
-	case keyboard.KeyArrowDown:
-		return Command{Kind: CmdChangeVolume, Value: -volumeStep}
-	case keyboard.KeyArrowUp:
-		return Command{Kind: CmdChangeVolume, Value: volumeStep}
-	case keyboard.KeyEsc:
-		return Command{Kind: CmdQuit}
-	default:
-		return Command{Kind: CmdNone}
-	}
-}
-
-func translateKeyPress(kp KeyPress) Command {
-	if kp.Rune != 0 {
-		return translateRune(kp.Rune)
-	} else {
-		return translateKey(kp.Key)
-	}
-}
-
-func main() {
+func Greet() {
 	typeMessage("Welcome to Axiom MP3-player", 0)
+}
 
-	//declare signal channels
-	var songSelectionMode bool
-	songSelectionMode = false
-	quitChan := make(chan struct{})
-	showQueueChan := make(chan struct{})
-	updateTimer := make(chan struct{})
-	hasSongs := make(chan struct{}, 1)
-
-	//scan for songs
+func scanSongs() []Song {
 	allSongs, err := FindSongs(".")
 	if err != nil {
 		log.Fatal(err)
 	}
+	return allSongs
+}
 
-	//print control bindings
+func printControls() {
 	fmt.Println("Up and Down keys — change volume")
 	fmt.Println("Left and Right keys — change speed")
 	fmt.Println("Enter — toggle pause")
 	fmt.Println("Q — add song to query")
 	fmt.Println("S - skip song")
 	fmt.Println("D - show query")
+}
 
-	//list songs with their indexes. UI
-	listSongs(allSongs)
-
-	//enable real-time input mode
-	err = keyboard.Open()
+func initializeKeyboard() error {
+	err := keyboard.Open()
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer keyboard.Close()
+	return err
+}
 
-	cmdChan := make(chan Command)
-	songSelectionChan := make(chan KeyPress, 16)
-	keyPressChan := make(chan KeyPress, 16)
-
-	player := NewPlayer()
-	//raw input goroutine
+func startRawInputRoutine(keyPressChan chan KeyPress) {
 	go func() {
 		for {
 			//read a key from keyboard
@@ -242,74 +193,68 @@ func main() {
 			if err != nil {
 				fmt.Println("Couldn't get key:", err)
 			}
-			//send wherever curInChan points to
 			keyPressChan <- KeyPress{Rune: char, Key: key}
 		}
 	}()
+}
 
-	//handle playerInput
+func startPlayerInputRoutine(
+	keyPressChan chan KeyPress,
+	cmdChan chan Command,
+	songSelectionChan chan KeyPress,
+	songSelectionMode *bool,
+) {
 	go func() {
 		for kp := range keyPressChan {
-			if songSelectionMode {
+			if *songSelectionMode {
 				songSelectionChan <- kp
 			} else {
 				cmdChan <- translateKeyPress(kp)
 			}
 		}
 	}()
+}
 
-	go func() {
-		for {
-			cmd := <- cmdChan
+func main() {
+	Greet()
 
-			switch cmd.Kind {
-			case CmdAddToQueue:
-				listSongs(allSongs)
-				songSelectionMode = true
-				queueSong := chooseSong(songSelectionChan, allSongs)
-				songSelectionMode = false
-				fmt.Println(queueSong.Name)
-				player.Playlist = append(player.Playlist, queueSong)
-				select { case hasSongs <- struct{}{}: default: }
-			case CmdSkip:
-				player.Skip()
-			case CmdShowQueue:
-				showQueueChan <- struct{}{}
-			case CmdSeek:
-				if delta, ok := cmd.Value.(time.Duration); player.Streamer != nil && ok {
-					player.Seek(delta)
-				} else {
-					fmt.Println("Invalid type for time duration")
-				}
-			case CmdTogglePause:
-				player.TogglePause()
-			case CmdChangeSpeed:
-				//type assertion
-				if delta, ok := cmd.Value.(float64); ok {
-					player.ChangeSpeed(delta)
-				} else {
-					fmt.Println("Invalid type for changing speed")
-				}
-			case CmdChangeVolume:
-				//type assertion
-				if delta, ok := cmd.Value.(float64); ok {
-					player.ChangeVolume(delta)
-				} else {
-					fmt.Println("Invalid type for changing volume")
-				}
-			case CmdQuit:
-				select {
-				case quitChan <- struct{}{}:
-				default:
-					typeMessage("Thhhhanks for using Axiom MP3-player", 0)
-					player.updateTick.Stop()
-					time.Sleep(time.Second)
-					keyboard.Close()
-					os.Exit(0)
-				}
-			}
-		}
-	}()
+	// Сканируем песни
+	allSongs := scanSongs()
+
+	// Печатаем управление
+	printControls()
+
+	// Выводим список песен
+	listSongs(allSongs)
+
+	// Инициализируем клавиатуру
+	initializeKeyboard()
+	defer keyboard.Close()
+
+	// Настраиваем каналы
+	quitChan, showQueueChan, updateTimer, hasSongs, cmdChan, songSelectionChan, keyPressChan := setupChannels()
+	songSelectionMode := false
+
+	// Создаем плеер
+	player := NewPlayer()
+
+	// Запускаем goroutines
+	startRawInputRoutine(keyPressChan)
+	startPlayerInputRoutine(keyPressChan, cmdChan, songSelectionChan, &songSelectionMode)
+
+	// Create command handler
+	cmdHandler := NewCommandHandler(
+		&songSelectionMode,
+		songSelectionChan,
+		allSongs,
+		player,
+		hasSongs,
+		showQueueChan,
+		quitChan,
+	)
+
+	// Start command handler
+	cmdHandler.Start(cmdChan)
 
 	go func() {
 		for {
@@ -318,63 +263,7 @@ func main() {
 		}
 	}()
 
-	for {
-		//wait until there is a signal that there are songs
-		<- hasSongs
-
-		player.PlayNext()
-
-		innerloop:
-		for {
-			//wait till one of the actions is done
-			select {
-			case <- player.songSkip:
-				player.TogglePause()
-
-				//if there are any remaining songs in the playlist, send signal to hasSongs
-				//to unblock player
-				if len(player.Playlist) > 0 {
-					select {
-					case hasSongs <- struct{}{}:
-					default:
-					}
-				}
-				break innerloop
-			case <- player.songDone:
-				//if there are any remaining songs in the playlist, send signal to hasSongs
-				//to unblock player
-				fmt.Println("Song is done!")
-				if len(player.Playlist) > 0 {
-					select {
-					case hasSongs <- struct{}{}:
-					default:
-					}
-				}
-				break innerloop
-			case <- player.updateTick.C:
-				updateTime(player.Streamer, player.Format)
-			case <- updateTimer:
-				updateTime(player.Streamer, player.Format)
-			case <- quitChan:
-				typeMessage("Thanks fffor using Axiom MP3-player", 0)
-				player.updateTick.Stop()
-				speaker.Lock()
-				speaker.Close()
-				speaker.Unlock()
-				close(player.songSkip)
-				close(player.songDone)
-				close(hasSongs)
-				time.Sleep(time.Second)
-				return
-			}
-		}
-
-		if player.Streamer != nil {
-			if err := player.Streamer.Close(); err != nil {
-				fmt.Println("Error closing streamer: ", err)
-			}
-		}
-		player.Streamer = nil
-		player.File = nil
-	}
+	// Create and start playback manager
+	playbackManager := NewPlaybackManager(player, hasSongs, quitChan, updateTimer)
+	playbackManager.Start()
 }
