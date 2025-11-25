@@ -101,3 +101,95 @@ func (p *Player) Skip() error {
 	p.songSkip <- struct{}{}
 	return nil
 }
+
+type PlaybackManager struct {
+    player     *Player
+    hasSongs   chan struct{}
+    quitChan   chan struct{}
+    updateTimer chan struct{}
+}
+
+func NewPlaybackManager(player *Player, hasSongs, quitChan, updateTimer chan struct{}) *PlaybackManager {
+    return &PlaybackManager{
+        player:     player,
+        hasSongs:   hasSongs,
+        quitChan:   quitChan,
+        updateTimer: updateTimer,
+    }
+}
+
+func (pm *PlaybackManager) Start() {
+    for {
+        // Wait until there is a signal that there are songs
+        <-pm.hasSongs
+
+        pm.player.PlayNext()
+
+        if !pm.handlePlayback() {
+            return
+        }
+
+        pm.cleanupCurrentSong()
+    }
+}
+
+func (pm *PlaybackManager) handlePlayback() bool {
+    for {
+        select {
+        case <-pm.player.songSkip:
+            return pm.handleSongSkip()
+        case <-pm.player.songDone:
+            return pm.handleSongDone()
+        case <-pm.player.updateTick.C:
+            updateTime(pm.player.Streamer, pm.player.Format)
+        case <-pm.updateTimer:
+            updateTime(pm.player.Streamer, pm.player.Format)
+        case <-pm.quitChan:
+            pm.handleQuit()
+            return false
+        }
+    }
+}
+
+func (pm *PlaybackManager) handleSongSkip() bool {
+    pm.player.TogglePause()
+    pm.notifyNextSong()
+    return true
+}
+
+func (pm *PlaybackManager) handleSongDone() bool {
+    fmt.Println("Song is done!")
+    pm.notifyNextSong()
+    return true
+}
+
+func (pm *PlaybackManager) notifyNextSong() {
+    if len(pm.player.Playlist) > 0 {
+        select {
+        case pm.hasSongs <- struct{}{}:
+        default:
+        }
+    }
+}
+
+func (pm *PlaybackManager) handleQuit() {
+    typeMessage("Thanks for using Axiom MP3-player", 0)
+    pm.player.updateTick.Stop()
+    speaker.Lock()
+    speaker.Close()
+    speaker.Unlock()
+    close(pm.player.songSkip)
+    close(pm.player.songDone)
+    close(pm.hasSongs)
+    time.Sleep(time.Second)
+}
+
+func (pm *PlaybackManager) cleanupCurrentSong() {
+    if pm.player.Streamer != nil {
+        if err := pm.player.Streamer.Close(); err != nil {
+            fmt.Println("Error closing streamer: ", err)
+        }
+    }
+    pm.player.Streamer = nil
+    pm.player.File = nil
+}
