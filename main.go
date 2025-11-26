@@ -13,7 +13,6 @@ import (
 	//	"strings"
 	"github.com/eiannone/keyboard"
 	"github.com/gopxl/beep"
-	"github.com/gopxl/beep/effects"
 )
 
 const (
@@ -27,22 +26,6 @@ const (
 	maxSpeed = 2.0
 )
 
-type Player struct {
-	Playlist []Song
-
-	Streamer beep.StreamSeekCloser
-	File *os.File
-	Format beep.Format
-	Control *beep.Ctrl
-	Speed *beep.Resampler
-	Volume *effects.Volume
-
-	//internal channgels for controlling
-	songDone chan struct{}
-	songSkip chan struct{}
-	updateTick *time.Ticker
-}
-
 var ErrNoSongs = errors.New("No songs in playlist")
 
 func listSongs(songs []Song) {
@@ -51,7 +34,10 @@ func listSongs(songs []Song) {
 	}
 }
 
-func chooseSong(eventChan <-chan KeyPress, songs []Song) Song {
+func chooseSong(h *CommandHandler) Song {
+	eventChan := h.songSelectionChan
+	songs := h.allSongs
+
 	fmt.Println("Enter the number of song: ")
 
 	var input []rune
@@ -79,10 +65,9 @@ func chooseSong(eventChan <-chan KeyPress, songs []Song) Song {
 				fmt.Print("\b \b")
 			}
 		case keyboard.KeyEsc:
-			typeMessage("Thanks for using Axiom MP3-player", 0)
-			time.Sleep(time.Second)
-			keyboard.Close()
-			os.Exit(0)
+			fmt.Println("h")
+			h.handleQuit()
+			return Song{}
 		default:
 			if ev.Rune >= '0' && ev.Rune <= '9' {
 				input = append(input, ev.Rune)
@@ -218,27 +203,25 @@ func startPlayerInputRoutine(
 func main() {
 	Greet()
 
-	// Сканируем песни
+	// scan for songs
 	allSongs := scanSongs()
 
-	// Печатаем управление
 	printControls()
-
-	// Выводим список песен
 	listSongs(allSongs)
 
-	// Инициализируем клавиатуру
 	initializeKeyboard()
 	defer keyboard.Close()
 
-	// Настраиваем каналы
-	quitChan, showQueueChan, updateTimer, hasSongs, cmdChan, songSelectionChan, keyPressChan := setupChannels()
+	// set up channels
+	quitChan, showQueueChan, updateTimer, hasSongs, cmdChan,
+	 songSelectionChan, keyPressChan := setupChannels()
+
 	songSelectionMode := false
 
-	// Создаем плеер
+	// create player
 	player := NewPlayer()
 
-	// Запускаем goroutines
+	// launch input goroutines
 	startRawInputRoutine(keyPressChan)
 	startPlayerInputRoutine(keyPressChan, cmdChan, songSelectionChan, &songSelectionMode)
 
@@ -257,8 +240,7 @@ func main() {
 	cmdHandler.Start(cmdChan)
 
 	go func() {
-		for {
-			<- showQueueChan
+		for range showQueueChan{
 			fmt.Println(player.Playlist)
 		}
 	}()

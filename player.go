@@ -10,6 +10,22 @@ import (
 	"github.com/gopxl/beep/speaker"
 )
 
+type Player struct {
+	Playlist []Song
+
+	Streamer beep.StreamSeekCloser
+	File *os.File
+	Format beep.Format
+	Control *beep.Ctrl
+	Speed *beep.Resampler
+	Volume *effects.Volume
+
+	//internal channgels for controlling
+	songDone chan struct{}
+	songSkip chan struct{}
+	updateTick *time.Ticker
+}
+
 func NewPlayer() *Player {
 	return &Player{
 		Playlist: []Song{},
@@ -103,93 +119,99 @@ func (p *Player) Skip() error {
 }
 
 type PlaybackManager struct {
-    player     *Player
-    hasSongs   chan struct{}
-    quitChan   chan struct{}
-    updateTimer chan struct{}
+	player     *Player
+	hasSongs   chan struct{}
+	quitChan   chan struct{}
+	updateTimer chan struct{}
 }
 
 func NewPlaybackManager(player *Player, hasSongs, quitChan, updateTimer chan struct{}) *PlaybackManager {
-    return &PlaybackManager{
-        player:     player,
-        hasSongs:   hasSongs,
-        quitChan:   quitChan,
-        updateTimer: updateTimer,
-    }
+	return &PlaybackManager{
+		player:     player,
+		hasSongs:   hasSongs,
+		quitChan:   quitChan,
+		updateTimer: updateTimer,
+	}
 }
 
 func (pm *PlaybackManager) Start() {
-    for {
-        // Wait until there is a signal that there are songs
-        <-pm.hasSongs
+	for {
+		// Wait until there is a signal that there are songs
+		select {
+		case <-pm.hasSongs:
+			pm.player.PlayNext()
 
-        pm.player.PlayNext()
+			if !pm.handlePlayback() {
+				return
+			}
 
-        if !pm.handlePlayback() {
-            return
-        }
-
-        pm.cleanupCurrentSong()
-    }
+			pm.cleanupCurrentSong()
+		case <-pm.quitChan:
+			pm.handleQuit()
+			return
+		}
+	}
 }
 
 func (pm *PlaybackManager) handlePlayback() bool {
-    for {
-        select {
-        case <-pm.player.songSkip:
-            return pm.handleSongSkip()
-        case <-pm.player.songDone:
-            return pm.handleSongDone()
-        case <-pm.player.updateTick.C:
-            updateTime(pm.player.Streamer, pm.player.Format)
-        case <-pm.updateTimer:
-            updateTime(pm.player.Streamer, pm.player.Format)
-        case <-pm.quitChan:
-            pm.handleQuit()
-            return false
-        }
-    }
+	for {
+		select {
+		case <-pm.player.songSkip:
+			return pm.handleSongSkip()
+		case <-pm.player.songDone:
+			return pm.handleSongDone()
+		case <-pm.player.updateTick.C:
+			updateTime(pm.player.Streamer, pm.player.Format)
+		case <-pm.updateTimer:
+			updateTime(pm.player.Streamer, pm.player.Format)
+		case <-pm.quitChan:
+			pm.handleQuit()
+			return false
+		}
+	}
 }
 
 func (pm *PlaybackManager) handleSongSkip() bool {
-    pm.player.TogglePause()
-    pm.notifyNextSong()
-    return true
+	pm.player.TogglePause()
+	pm.notifyNextSong()
+	return true
 }
 
 func (pm *PlaybackManager) handleSongDone() bool {
-    fmt.Println("Song is done!")
-    pm.notifyNextSong()
-    return true
+	fmt.Println("Song is done!")
+	pm.notifyNextSong()
+	return true
 }
 
 func (pm *PlaybackManager) notifyNextSong() {
-    if len(pm.player.Playlist) > 0 {
-        select {
-        case pm.hasSongs <- struct{}{}:
-        default:
-        }
-    }
+	if len(pm.player.Playlist) > 0 {
+		select {
+		case pm.hasSongs <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func (pm *PlaybackManager) handleQuit() {
-    typeMessage("Thanks for using Axiom MP3-player", 0)
-    pm.player.updateTick.Stop()
-    speaker.Lock()
-    speaker.Close()
-    speaker.Unlock()
-    close(pm.player.songSkip)
-    close(pm.player.songDone)
-    close(pm.hasSongs)
-    time.Sleep(time.Second)
+	typeMessage("Thanks for using Axiom MP3-player", 0)
+	pm.player.updateTick.Stop()
+
+	if pm.player.Streamer != nil {
+		pm.player.Streamer.Close()
+	}
+
+	close(pm.player.songSkip)
+	close(pm.hasSongs)
+
+	time.Sleep(time.Millisecond * 500)
 }
 
 func (pm *PlaybackManager) cleanupCurrentSong() {
-    if pm.player.Streamer != nil {
-        if err := pm.player.Streamer.Close(); err != nil {
-            fmt.Println("Error closing streamer: ", err)
-        }
-    }
-    pm.player.Streamer = nil
-    pm.player.File = nil
+	if pm.player.Streamer != nil {
+		if err := pm.player.Streamer.Close(); err != nil {
+			fmt.Println("Error closing streamer: ", err)
+		}
+	}
+	pm.player.Streamer = nil
+	pm.player.File = nil
 }
