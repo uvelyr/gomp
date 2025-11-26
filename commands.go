@@ -4,7 +4,7 @@ import (
 	"github.com/eiannone/keyboard"
 	"fmt"
 	"time"
-	"os"
+	"sync"
 )
 type CommandKind int
 
@@ -72,6 +72,7 @@ type CommandHandler struct {
 	hasSongs          chan struct{}
 	showQueueChan     chan struct{}
 	quitChan          chan struct{}
+	quitOnce          sync.Once
 }
 
 func NewCommandHandler(
@@ -126,7 +127,7 @@ func (h *CommandHandler) Handle(cmd Command) {
 func (h *CommandHandler) handleAddToQueue() {
 	listSongs(h.allSongs)
 	*h.songSelectionMode = true
-	queueSong := chooseSong(h.songSelectionChan, h.allSongs)
+	queueSong := chooseSong(h)
 	*h.songSelectionMode = false
 	fmt.Println(queueSong.Name)
 	(*h).player.Playlist = append(h.player.Playlist, queueSong)
@@ -161,13 +162,12 @@ func (h *CommandHandler) handleChangeVolume(cmd Command) {
 }
 
 func (h *CommandHandler) handleQuit() {
-	select {
-	case h.quitChan <- struct{}{}:
-	default:
-		typeMessage("Thhhhanks for using Axiom MP3-player", 0)
-		h.player.updateTick.Stop()
-		time.Sleep(time.Second)
-		keyboard.Close()
-		os.Exit(0)
-	}
+	h.quitOnce.Do(func() {
+		select {
+		case h.quitChan <- struct{}{}:
+		default:
+		}
+		close(h.songSelectionChan)
+		close(h.showQueueChan)
+	})
 }
