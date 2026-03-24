@@ -54,7 +54,10 @@ func (pm *PlaybackManager) PlayNext() error {
 	p.Format = format
 
 	//initiating a streamer.
-	p.Control = &beep.Ctrl{Streamer: streamer, Paused: false}
+	p.Control = &beep.Ctrl{
+		Streamer: streamer,
+		Paused: false,
+	}
 	p.Volume = &effects.Volume{
 		Streamer: p.Control,
 		Volume:   0,
@@ -163,9 +166,7 @@ func (pm *PlaybackManager) handlePlayback() bool {
 	for {
 		select {
 		case <-pm.player.songSkip:
-			if len(pm.playlist) > 0 {
-				return pm.handleSongSkip()
-			}
+			return pm.handleSongSkip()
 		case <-pm.player.songDone:
 			return pm.handleSongDone()
 		case <-pm.player.updateTick.C:
@@ -180,6 +181,10 @@ func (pm *PlaybackManager) handlePlayback() bool {
 }
 
 func (pm *PlaybackManager) handleSongSkip() bool {
+	if len(pm.playlist) < 0 {
+		return true
+	}
+
 	pm.player.TogglePause()
 	pm.notifyNextSong()
 	pm.uiChan <- UIUpdatePlaybackBox

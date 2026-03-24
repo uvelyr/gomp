@@ -73,11 +73,11 @@ func main() {
 	ui := NewUI(screen, &PlaybackManager{}, allSongs)
 	uiChan := ui.uiRequestChan
 
-	// Create playback manager
+	// create playback manager
 	playbackManager := NewPlaybackManager(player, uiChan)
 	ui.playback = playbackManager
 
-	// Create command handler
+	// create command handler
 	cmdHandler := NewCommandHandler(playbackManager, ui)
 
 	ui.start()
