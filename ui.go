@@ -188,6 +188,9 @@ func (ui *UI) updatePlaylistBox() {
 			ui.screen.SetContent(x+i, y, rune(song.Name[i]), nil, style) 
 		}
 		y++
+		if y >= playlistBox.startY+playlistBox.height-1 {
+			break
+		}
 	}
 	ui.screen.Show()
 //	fmt.Println(ui.playback.playlist)
@@ -290,22 +293,43 @@ func (ui *UI) selectSong() Song {
 	}
 	songs := ui.allSongs
 	selectionID := -1
-	if len(songs) != 0 {
+	if len(songs) > 0 {
 		selectionID = 0
-		ui.updateSongList(songs, songs[0])
 	}
+	render := func() {
+		visible := songListBox.height-2
+		offset := 0
+		if selectionID >= visible {
+			offset = selectionID-visible + 1
+		}
+		if selectionID >=0 {
+			ui.updateSongList(songs[offset:], songs[selectionID])
+		} else {
+			ui.updateSongList(songs[offset:])
+		}
+	}
+	refresh := func() {
+		songs = ui.searchSongs(string(searchInput))
+		selectionID = -1
+		if len(songs) > 0 {
+			selectionID = 0
+		}
+		render()
+	}
+	render()
+
 	for ev := range ui.songSelectionChan {
 		switch ev.Key {
 		case tcell.KeyDown:
-			if selectionID+1 <= len(songs)-1 {
+			if selectionID >= 0 && selectionID < len(songs)-1 {
 				selectionID++
 			}
-			ui.updateSongList(songs, songs[selectionID])
+			render()
 		case tcell.KeyUp:
-			if selectionID-1 >= 0 {
+			if selectionID > 0 {
 				selectionID--
 			}
-			ui.updateSongList(songs, songs[selectionID])
+			render()
 		case tcell.KeyEnter:
 			if selectionID >= 0 && selectionID <= len(songs)-1 {
 				selectedSong := songs[selectionID]
@@ -319,33 +343,18 @@ func (ui *UI) selectSong() Song {
 			if len(searchInput) > 0 {
 				searchInput = searchInput[:len(searchInput)-1]
 				updateSearchField()
-			}
-			songs = ui.searchSongs(string(searchInput))
-			if len(songs) == 0{
-				selectionID = -1
-			} else {
-				ui.updateSongList(songs, songs[0])
+				refresh()
 			}
 		case tcell.KeyEsc:
 			//return empty to indicate that we're leaving song selection mode
-			ui.updateSongList(songs)
+			ui.updateSongList(ui.allSongs)
 			return Song{}
 		case tcell.KeyRune:
-			r := ev.Rune
-			searchInput = append(searchInput, r)
+			searchInput = append(searchInput, ev.Rune)
 			updateSearchField()
-			songs = ui.searchSongs(string(searchInput))
-			if len(songs) == 0{
-				selectionID = -1
-			}
-			if selectionID >= 0 {
-				ui.updateSongList(songs, songs[0])
-			} else {
-				ui.updateSongList(songs)
-			}
+			refresh()
 		}
 	}
-
 	return Song{}
 }
 

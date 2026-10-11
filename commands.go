@@ -131,7 +131,9 @@ func (h *CommandHandler) Handle(cmd Command) {
 }
 
 func (h *CommandHandler) handleSkip() {
-	h.playback.player.Skip()
+	if h.playback.player.Streamer != nil{
+		h.playback.player.Skip()
+	}
 }
 
 func (h *CommandHandler) HandleTogglePause() {
@@ -152,6 +154,7 @@ func (h *CommandHandler) handleAddToQueue() {
 		(*h).playback.playlist = append(h.playback.playlist, queueSong)
 		h.playback.notifyNextSong()
 	}
+	h.uiRequestChan <- UIRequest{Type: UIUpdatePlaylistBox}
 	h.uiRequestChan <- UIRequest{Type: UIUpdatePlaybackBox}
 }
 
@@ -159,26 +162,21 @@ func (h *CommandHandler) handleSeek(cmd Command) {
 	if delta, ok := cmd.Value.(time.Duration); h.playback.player.Streamer != nil && ok {
 		h.playback.player.Seek(delta)
 		h.uiRequestChan <- UIRequest{Type: UIUpdatePlaybackBox}
-	} else {
-		fmt.Println("Invalid type for time duration")
 	}
 }
 
 func (h *CommandHandler) handleChangeSpeed(cmd Command) {
-	if delta, ok := cmd.Value.(float64); ok {
+	if delta, ok := cmd.Value.(float64); h.playback.player.Streamer != nil && ok {
 		h.playback.player.ChangeSpeed(delta)
 		h.uiRequestChan <- UIRequest{Type: UIUpdatePlaybackBox}
-	} else {
-		fmt.Println("Invalid type for changing speed")
 	}
 }
 
 func (h *CommandHandler) handleChangeVolume(cmd Command) {
-	if delta, ok := cmd.Value.(float64); ok {
+	//what does float64 do
+	if delta, ok := cmd.Value.(float64); h.playback.player.Streamer != nil && ok {
 		h.playback.player.ChangeVolume(delta)
 		h.uiRequestChan <- UIRequest{Type: UIUpdatePlaybackBox}
-	} else {
-		fmt.Println("Invalid type for changing volume")
 	}
 }
 

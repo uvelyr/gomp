@@ -152,7 +152,8 @@ func (pm *PlaybackManager) Start() {
 		select {
 		case <-pm.hasSongs:
 			pm.PlayNext()
-
+			
+			pm.uiChan <- UIRequest{Type: UIUpdatePlaylistBox}
 			if !pm.handlePlayback() {
 				return
 			}
@@ -184,12 +185,9 @@ func (pm *PlaybackManager) handlePlayback() bool {
 }
 
 func (pm *PlaybackManager) handleSongSkip() bool {
-	if len(pm.playlist) < 0 {
-		return true
-	}
-
-	pm.player.TogglePause()
-	pm.notifyNextSong()
+	speaker.Clear()
+	pm.currentSong = nil
+	pm.notifyNextSong() // starts the next song if the queue is non-empty
 	pm.uiChan <- UIRequest{Type: UIUpdatePlaybackBox}
 	pm.uiChan <- UIRequest{Type: UIUpdatePlaylistBox}
 	return true
@@ -203,7 +201,8 @@ func (pm *PlaybackManager) handleSongDone() bool {
 	return true
 }
 
-//and what the fuck does that do?? maybe put comments nigga?
+//if the pm.hassongs is empty, send there a signal to play
+//else, it does nothing and moves on, cause apparently smth is already playing
 func (pm *PlaybackManager) notifyNextSong() {
 	if len(pm.playlist) > 0 {
 		select {

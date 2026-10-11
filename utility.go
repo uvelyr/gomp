@@ -18,10 +18,11 @@ func clampFloat(v, lo, hi float64) float64 {
 
 // converts sample count to mm:ss string
 func formatDuration(pos int, sr beep.SampleRate) string {
-	secs := int(float64(pos) / float64(sr))
-	min := secs / 60
-	sec := secs % 60
-	return fmt.Sprintf("%02d:%02d", min, sec)
+	if sr <= 0 || pos < 0 {
+		return "00:00"
+	}
+	secs := pos / int(sr)
+	return fmt.Sprintf("%02d:%02d", secs/60, secs%60)
 }
 
 func clampInt(v, lo, hi int) int {
