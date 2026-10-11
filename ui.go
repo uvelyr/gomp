@@ -1,19 +1,25 @@
 package main
 
 import (
+	"slices"
 	"fmt"
 	"github.com/gdamore/tcell/v2"
-	"strconv"
 )
 
-type UIRequest int
+type UIRequestType int
 
 const (
-	UIUpdatePlaybackBox UIRequest = iota
+	UIUpdatePlaybackBox UIRequestType = iota
+	UIUpdatePlaylistBox
 	UIDrawSongSelectionBox
 	UIClearSongSelectionBox
 	UISelectSong
 )
+
+type UIRequest struct {
+	Type  UIRequestType
+	Reply chan Song
+}
 
 func (ui *UI) drawBox(box Box) {
 	style := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlack)
@@ -42,20 +48,35 @@ func (ui *UI) drawBox(box Box) {
 	}
 }
 
-func (ui *UI) displaySongList() {
+func (ui *UI) clearBox(b Box) {
+    for y := b.startY + 1; y < b.startY+b.height-1; y++ {
+        for x := b.startX + 1; x < b.startX+b.width-1; x++ {
+            ui.screen.SetContent(x, y, ' ', nil, tcell.StyleDefault)
+        }
+    }
+}
+
+func (ui *UI) updateSongList(songs []Song, highlighted ...Song) {
 	box := songListBox
-	style := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlack)
+	defaultStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlack)
+	ui.drawBox(box)
+	ui.clearBox(box)
 
-	ui.drawBox(songListBox)
-
-	for i, song := range ui.songs {
+	for i, song := range songs {
 		y := box.startY + 1 + i
 		if y >= box.startY+box.height-1 {
 			break
 		}
-		line := strconv.Itoa(i+1) + ": " + song.Name
+
+		style := defaultStyle.Reverse(slices.Contains(highlighted, song))
+
+		line := song.Name
+
 		for x, ch := range line {
-			if x >= box.width-2 {
+			if x >= box.width-5 && len(line) > box.width-2{
+				ui.screen.SetContent(box.startX+1+x, y, ch, nil, style)
+				ui.screen.SetContent(box.startX+2+x, y, ch, nil, style)
+				ui.screen.SetContent(box.startX+3+x, y, ch, nil, style)
 				break
 			}
 			ui.screen.SetContent(box.startX+1+x, y, ch, nil, style)
@@ -67,6 +88,11 @@ func (ui *UI) displaySongList() {
 
 func (ui *UI) drawPlaybackBox() {
 	ui.drawBox(playbackBox)
+	ui.screen.Show()
+}
+
+func (ui *UI) drawPlaylistBox() {
+	ui.drawBox(playlistBox)
 	ui.screen.Show()
 }
 
@@ -151,8 +177,24 @@ func (ui *UI) updatePlaybackBox() {
 	ui.screen.Show()
 }
 
-func (ui *UI) drawSongSelectionBox() {
-	box := songSelectionBox
+//WIP
+func (ui *UI) updatePlaylistBox() {
+	ui.clearBox(playlistBox)
+	style := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlack)
+	y := playlistBox.startY+1
+	for _, song := range ui.playback.playlist {
+		x := playlistBox.startX+1
+		for i := 0; i < playlistBox.width-2 && i < len(song.Name); i++ {
+			ui.screen.SetContent(x+i, y, rune(song.Name[i]), nil, style) 
+		}
+		y++
+	}
+	ui.screen.Show()
+//	fmt.Println(ui.playback.playlist)
+}
+
+func (ui *UI) drawSongSearchBox() {
+	box := songSearchBox
 	style := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlack)
 
 	startX, startY, width, height := box.startX, box.startY, box.width, box.height
@@ -161,7 +203,7 @@ func (ui *UI) drawSongSelectionBox() {
 	bl := '└'
 	br := '┘'
 
-	title := "Enter song id"
+	title := " Search songs "
 	titleRunes := []rune(title)
 	titleLen := len(titleRunes)
 
@@ -201,8 +243,8 @@ func (ui *UI) drawSongSelectionBox() {
 	ui.screen.Show()
 }
 
-func (ui *UI) clearSongSelectionBox() {
-	box := songSelectionBox
+func (ui *UI) clearSongSearchBox() {
+	box := songSearchBox
 	style := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlack)
 
 	startX, startY, width, height := box.startX, box.startY, box.width, box.height
@@ -221,61 +263,85 @@ func (ui *UI) clearSongSelectionBox() {
 	ui.screen.SetContent(startX+width-1, startY-1, '┘', nil, style)
 }
 
-func (ui *UI) selectSong() Song {
-	var input []rune
-	field := songSelectionField
+func (ui *UI) searchSongs(searchInput string) []Song{
+	var matchingSongs []Song
+	for _, song := range ui.allSongs {
+		if len(searchInput) <= len(song.Name) && song.Name[:len(searchInput)] == searchInput {
+			matchingSongs = append(matchingSongs, song)
+		}
+	}
+	return matchingSongs
+}
 
-	updateInputField := func() {
+func (ui *UI) selectSong() Song {
+	var searchInput []rune
+	field := songSearchField
+
+	updateSearchField := func() {
 		// clear field
 		for x := 0; x < field.width; x++ {
 			ui.screen.SetContent(field.startX+x, field.startY, ' ', nil, tcell.StyleDefault)
 		}
-
-		// draw digits
-		for i, r := range input {
+		// draw input
+		for i, r := range searchInput {
 			ui.screen.SetContent(field.startX+i, field.startY, r, nil, tcell.StyleDefault)
 		}
-
 		ui.screen.Show()
 	}
-
+	songs := ui.allSongs
+	selectionID := -1
+	if len(songs) != 0 {
+		selectionID = 0
+		ui.updateSongList(songs, songs[0])
+	}
 	for ev := range ui.songSelectionChan {
 		switch ev.Key {
-
+		case tcell.KeyDown:
+			if selectionID+1 <= len(songs)-1 {
+				selectionID++
+			}
+			ui.updateSongList(songs, songs[selectionID])
+		case tcell.KeyUp:
+			if selectionID-1 >= 0 {
+				selectionID--
+			}
+			ui.updateSongList(songs, songs[selectionID])
 		case tcell.KeyEnter:
-			if len(input) == 0 {
-				input = nil
-				updateInputField()
-				return Song{}
+			if selectionID >= 0 && selectionID <= len(songs)-1 {
+				selectedSong := songs[selectionID]
+				searchInput = nil
+				songs = ui.allSongs
+				ui.updateSongList(songs)
+				updateSearchField()
+				return selectedSong
 			}
-			n, err := strconv.Atoi(string(input))
-			if err != nil || n < 1 || n > len(ui.songs) {
-				msg := "Invalid id"
-				style := tcell.StyleDefault.Foreground(tcell.ColorGray)
-				for i, r := range msg {
-					ui.screen.SetContent(field.startX+i, field.startY, r, nil, style)
-				}
-				ui.screen.Show()
-
-				input = nil
-				updateInputField()
-				continue
-			}
-			return ui.songs[n-1]
 		case tcell.KeyBackspace, tcell.KeyBackspace2:
-			if len(input) > 0 {
-				input = input[:len(input)-1]
-				updateInputField()
+			if len(searchInput) > 0 {
+				searchInput = searchInput[:len(searchInput)-1]
+				updateSearchField()
+			}
+			songs = ui.searchSongs(string(searchInput))
+			if len(songs) == 0{
+				selectionID = -1
+			} else {
+				ui.updateSongList(songs, songs[0])
 			}
 		case tcell.KeyEsc:
 			//return empty to indicate that we're leaving song selection mode
+			ui.updateSongList(songs)
 			return Song{}
-
 		case tcell.KeyRune:
 			r := ev.Rune
-			if r >= '0' && r <= '9' {
-				input = append(input, r)
-				updateInputField()
+			searchInput = append(searchInput, r)
+			updateSearchField()
+			songs = ui.searchSongs(string(searchInput))
+			if len(songs) == 0{
+				selectionID = -1
+			}
+			if selectionID >= 0 {
+				ui.updateSongList(songs, songs[0])
+			} else {
+				ui.updateSongList(songs)
 			}
 		}
 	}
@@ -286,7 +352,7 @@ func (ui *UI) selectSong() Song {
 type UI struct {
 	screen   tcell.Screen
 	playback *PlaybackManager // Added: direct reference to player
-	songs    []Song
+	allSongs    []Song
 
 	//UI OWNS these channels (not read-only in struct)
 	songSelectionMode   bool
@@ -300,11 +366,11 @@ type UI struct {
 }
 
 // Constructor returns UI with all channels it owns
-func NewUI(screen tcell.Screen, playback *PlaybackManager, songs []Song) *UI {
+func NewUI(screen tcell.Screen, playback *PlaybackManager, uiChan chan UIRequest, allSongs []Song) *UI {
 	return &UI{
 		screen:   screen,
 		playback: playback, // Store playback reference
-		songs:    songs,
+		allSongs:    allSongs,
 
 		// UI creates and owns these channels
 		songSelectionMode:   false,
@@ -313,29 +379,33 @@ func NewUI(screen tcell.Screen, playback *PlaybackManager, songs []Song) *UI {
 		updatePlaybackChan:  make(chan struct{}, 8),
 		selectSongChan:      make(chan struct{}, 1),
 		selectionResultChan: make(chan Song, 1),
-		uiRequestChan:       make(chan UIRequest),
+		uiRequestChan:       uiChan,
 		quitChan:            make(chan struct{}, 1),
 	}
 }
 
 func (ui *UI) start() {
 	ui.startRawInputLoop()
-	ui.displaySongList()
+	ui.updateSongList(ui.allSongs)
 	ui.drawPlaybackBox()
+	ui.drawPlaylistBox()
 	go ui.handleRequests()
 }
 
 func (ui *UI) handleRequests() {
 	for r := range ui.uiRequestChan {
-		switch r {
+		switch r.Type {
 		case UIUpdatePlaybackBox:
 			ui.updatePlaybackBox()
+		case UIUpdatePlaylistBox:
+			ui.updatePlaylistBox()
 		case UISelectSong:
 			go func() {
-				ui.drawSongSelectionBox()
+				ui.drawSongSearchBox()
 				selectedSong := ui.selectSong()
-				ui.clearSongSelectionBox()
-				ui.selectionResultChan <- selectedSong
+				ui.clearSongSearchBox()
+				r.Reply <- selectedSong
+				ui.updatePlaylistBox()
 				ui.screen.Show()
 			}()
 		}

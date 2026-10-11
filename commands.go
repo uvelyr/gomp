@@ -67,28 +67,31 @@ func translateKeyPress(kp KeyPress) Command {
 
 type CommandHandler struct {
 	songSelectionMode bool
-	ui                *UI
 	playback          *PlaybackManager
-	uiChan            chan UIRequest
 	cmdChan           chan Command
 	quitChan          chan struct{}
+	uiRequestChan	chan<- UIRequest 
+	uiKeyPressChan	<-chan KeyPress
+	uiSongSelectionChan chan<- KeyPress
 	quitOnce          sync.Once
 }
 
-func NewCommandHandler(playback *PlaybackManager, ui *UI) *CommandHandler {
+func NewCommandHandler(playback *PlaybackManager, uiChan chan<- UIRequest, keyPressChan <-chan KeyPress, songSelectionChan chan<- KeyPress) *CommandHandler {
 	return &CommandHandler{
 		songSelectionMode: false,
 		playback:          playback,
 		cmdChan:           make(chan Command),
 		quitChan:          playback.quitChan,
-		ui:                ui,
+		uiRequestChan:                uiChan,
+		uiKeyPressChan:	keyPressChan,
+		uiSongSelectionChan: songSelectionChan,
 	}
 }
 
 func (h *CommandHandler) handleKeyPresses() {
-	for kp := range h.ui.keyPressChan {
+	for kp := range h.uiKeyPressChan {
 		if h.songSelectionMode {
-			h.ui.songSelectionChan <- kp
+			h.uiSongSelectionChan <- kp
 		} else {
 			h.cmdChan <- translateKeyPress(kp)
 		}
@@ -127,24 +130,21 @@ func (h *CommandHandler) Handle(cmd Command) {
 	}
 }
 
-func (h *CommandHandler) requestSongSelection() Song {
-	return h.ui.selectSong()
-}
-
 func (h *CommandHandler) handleSkip() {
 	h.playback.player.Skip()
 }
 
 func (h *CommandHandler) HandleTogglePause() {
 	h.playback.player.TogglePause()
-	h.ui.updatePlaybackBox()
+	h.uiRequestChan <- UIRequest{Type: UIUpdatePlaybackBox}
 }
 
 func (h *CommandHandler) handleAddToQueue() {
 	h.songSelectionMode = true
 
-	h.ui.uiRequestChan <- UISelectSong
-	queueSong := <-h.ui.selectionResultChan
+	reply := make(chan Song)
+	h.uiRequestChan <- UIRequest{Type: UISelectSong, Reply: reply}
+	queueSong := <-reply
 
 	h.songSelectionMode = false
 
@@ -152,12 +152,13 @@ func (h *CommandHandler) handleAddToQueue() {
 		(*h).playback.playlist = append(h.playback.playlist, queueSong)
 		h.playback.notifyNextSong()
 	}
+	h.uiRequestChan <- UIRequest{Type: UIUpdatePlaybackBox}
 }
 
 func (h *CommandHandler) handleSeek(cmd Command) {
 	if delta, ok := cmd.Value.(time.Duration); h.playback.player.Streamer != nil && ok {
 		h.playback.player.Seek(delta)
-		h.ui.updatePlaybackBox()
+		h.uiRequestChan <- UIRequest{Type: UIUpdatePlaybackBox}
 	} else {
 		fmt.Println("Invalid type for time duration")
 	}
@@ -166,7 +167,7 @@ func (h *CommandHandler) handleSeek(cmd Command) {
 func (h *CommandHandler) handleChangeSpeed(cmd Command) {
 	if delta, ok := cmd.Value.(float64); ok {
 		h.playback.player.ChangeSpeed(delta)
-		h.ui.updatePlaybackBox()
+		h.uiRequestChan <- UIRequest{Type: UIUpdatePlaybackBox}
 	} else {
 		fmt.Println("Invalid type for changing speed")
 	}
@@ -175,7 +176,7 @@ func (h *CommandHandler) handleChangeSpeed(cmd Command) {
 func (h *CommandHandler) handleChangeVolume(cmd Command) {
 	if delta, ok := cmd.Value.(float64); ok {
 		h.playback.player.ChangeVolume(delta)
-		h.ui.updatePlaybackBox()
+		h.uiRequestChan <- UIRequest{Type: UIUpdatePlaybackBox}
 	} else {
 		fmt.Println("Invalid type for changing volume")
 	}

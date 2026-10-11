@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"github.com/gdamore/tcell/v2"
 )
 
@@ -25,7 +26,7 @@ func FindSongs(path string) ([]Song, error) {
 				return nil, err
 			}
 			songs = append(songs, nestedSongs...)
-		} else if filepath.Ext(entry.Name()) == ".mp3" {
+		} else if strings.ToLower(filepath.Ext(entry.Name())) == ".mp3" {
 			songs = append(songs, Song{
 				Path: filepath.Join(path, entry.Name()),
 				Name: entry.Name(),
@@ -35,11 +36,11 @@ func FindSongs(path string) ([]Song, error) {
 	return songs, nil
 }
 
-func setupChannels() (quitChan chan struct{}, updateTimer chan struct{}) {
-	quitChan = make(chan struct{})
-	updateTimer = make(chan struct{})
-	return quitChan, updateTimer
-}
+//func setupChannels() (quitChan chan struct{}, updateTimer chan struct{}) {
+//	quitChan = make(chan struct{})
+//	updateTimer = make(chan struct{})
+//	return quitChan, updateTimer
+//}
 
 func scanSongs() []Song {
 	allSongs, err := FindSongs(".")
@@ -70,15 +71,14 @@ func main() {
 	// create player
 	player := NewPlayer()
 
-	ui := NewUI(screen, &PlaybackManager{}, allSongs)
-	uiChan := ui.uiRequestChan
-
+	uiChan := make(chan UIRequest)
 	// create playback manager
 	playbackManager := NewPlaybackManager(player, uiChan)
-	ui.playback = playbackManager
+
+	ui := NewUI(screen, playbackManager, uiChan, allSongs)
 
 	// create command handler
-	cmdHandler := NewCommandHandler(playbackManager, ui)
+	cmdHandler := NewCommandHandler(playbackManager, ui.uiRequestChan, ui.keyPressChan, ui.songSelectionChan)
 
 	ui.start()
 

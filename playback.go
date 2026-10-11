@@ -108,7 +108,10 @@ func (p *Player) ChangeSpeed(delta float64) error {
 
 func (p *Player) Seek(delta time.Duration) error {
 	speaker.Lock()
+	//current number of samples
 	curPos := p.Streamer.Position()
+	
+	//convert seconds to number samples
 	deltaSamples := p.Format.SampleRate.N(delta)
 	newPos := clampInt(curPos+deltaSamples, 0, p.Streamer.Len())
 	p.Streamer.Seek(newPos)
@@ -170,9 +173,9 @@ func (pm *PlaybackManager) handlePlayback() bool {
 		case <-pm.player.songDone:
 			return pm.handleSongDone()
 		case <-pm.player.updateTick.C:
-			pm.uiChan <- UIUpdatePlaybackBox
+			pm.uiChan <- UIRequest{Type: UIUpdatePlaybackBox}
 		case <-pm.updateTimer:
-			pm.uiChan <- UIUpdatePlaybackBox
+			pm.uiChan <- UIRequest{Type: UIUpdatePlaybackBox}
 		case <-pm.quitChan:
 			pm.handleQuit()
 			return false
@@ -187,17 +190,20 @@ func (pm *PlaybackManager) handleSongSkip() bool {
 
 	pm.player.TogglePause()
 	pm.notifyNextSong()
-	pm.uiChan <- UIUpdatePlaybackBox
+	pm.uiChan <- UIRequest{Type: UIUpdatePlaybackBox}
+	pm.uiChan <- UIRequest{Type: UIUpdatePlaylistBox}
 	return true
 }
 
 func (pm *PlaybackManager) handleSongDone() bool {
 	pm.currentSong = nil
-	pm.uiChan <- UIUpdatePlaybackBox
+	pm.uiChan <- UIRequest{Type: UIUpdatePlaybackBox}
+	pm.uiChan <- UIRequest{Type: UIUpdatePlaylistBox}
 	pm.notifyNextSong()
 	return true
 }
 
+//and what the fuck does that do?? maybe put comments nigga?
 func (pm *PlaybackManager) notifyNextSong() {
 	if len(pm.playlist) > 0 {
 		select {

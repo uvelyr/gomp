@@ -15,9 +15,11 @@ const (
 	maxSpeed   = 2.0
 )
 
+//box constructor arg order is startx starty width height
 var (
 	songListBox        = Box{0, 0, 25, 20}
-	songSelectionBox   = Box{songListBox.startX, songListBox.startY + songListBox.height, songListBox.width, 2}
-	songSelectionField = Field{songSelectionBox.startX + 1, songSelectionBox.startY, songSelectionBox.width - 2, 2}
+	songSearchBox   = Box{songListBox.startX, songListBox.startY + songListBox.height, songListBox.width, 2}
+	songSearchField = Field{songSearchBox.startX + 1, songSearchBox.startY, songSearchBox.width - 2, 2}
 	playbackBox        = Box{songListBox.startX + songListBox.width + 1, 0, 25, 7}
+	playlistBox = Box{songListBox.startX + songListBox.width + 1, playbackBox.startY + playbackBox.height, playbackBox.width, songListBox.height - playbackBox.height} 
 )
