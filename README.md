@@ -22,7 +22,8 @@ TUI mp3 player written in Go and based on github.com/gdamore/tcell/v2
 - Changing size of UI elements using mouse
 - Support of other audio formats
 - More vivid volume UI
-- Changing controls## Run Locally
+- Changing controls
+## Run Locally
 
 Clone the project
 
